@@ -9,7 +9,7 @@ from pathlib import Path
 
 class SpeechTranscriber:
     """使用 Whisper 进行语音识别和转写"""
-    
+
     def __init__(self, model_name='base', language='zh'):
         """
         Args:
@@ -53,19 +53,15 @@ class SpeechTranscriber:
             initial_prompt="这是一段正式的演讲或对话内容，可能涉及历史、政治、法律等话题，包含盗窃、愤怒等词汇。"
         )
         
-        # 整理输出格式
+        segments = [
+            {'id': seg['id'], 'start': seg['start'], 'end': seg['end'], 'text': seg['text'].strip()}
+            for seg in result['segments']
+        ]
+
         transcription = {
             'text': result['text'],
             'language': result['language'],
-            'segments': [
-                {
-                    'id': seg['id'],
-                    'start': seg['start'],
-                    'end': seg['end'],
-                    'text': seg['text'].strip()
-                }
-                for seg in result['segments']
-            ]
+            'segments': segments,
         }
         
         # 保存 JSON

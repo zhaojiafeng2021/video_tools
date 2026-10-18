@@ -45,6 +45,13 @@
   <p class="hint">或者直接上传修改好的 txt 文件（会覆盖上方文本框内容）：</p>
   <input type="file" id="scriptFileInput" accept=".txt">
   <br><br>
+  <label for="versionSelect">GPT-SoVITS 版本：</label>
+  <select id="versionSelect">
+    <option value="v2">v2</option>
+    <option value="v3">v3</option>
+    <option value="v4" selected>v4</option>
+  </select>
+  <br><br>
   <button id="applyBtn">开始替换语音并生成视频</button>
   <div class="hint" id="applyStatus"></div>
   <div class="error" id="applyError"></div>

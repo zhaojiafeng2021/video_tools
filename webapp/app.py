@@ -13,6 +13,8 @@ import json
 import uuid
 from pathlib import Path
 
+import yaml
+import requests
 from flask import Flask, request, jsonify, send_file, render_template
 
 # 让 webapp 能找到上一级 utils 模块
@@ -40,6 +42,54 @@ with open(CONFIG_PATH, "r", encoding="utf-8") as f:
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500MB
+
+# GPT-SoVITS 相关路径与可选版本，用于运行时切换模型权重
+GPTSOVITS_DIR = Path(r"C:\Users\gg.zhao\Downloads\GPT-SoVITS")
+GPTSOVITS_API_URL = "http://127.0.0.1:9880"
+TTS_INFER_CONFIG_PATH = GPTSOVITS_DIR / "GPT_SoVITS" / "configs" / "tts_infer.yaml"
+SUPPORTED_GPTSOVITS_VERSIONS = {"v2", "v3", "v4"}
+
+
+def switch_gptsovits_version(version):
+    """调用 GPT-SoVITS API 切换到指定版本的 GPT/SoVITS 权重（无需重启服务）
+
+    Args:
+        version: "v2" / "v3" / "v4"
+
+    Raises:
+        ValueError: 版本不受支持或 tts_infer.yaml 中缺少对应配置
+        RuntimeError: 调用 GPT-SoVITS API 切换权重失败
+    """
+    if version not in SUPPORTED_GPTSOVITS_VERSIONS:
+        raise ValueError(f"不支持的 GPT-SoVITS 版本: {version}")
+
+    with open(TTS_INFER_CONFIG_PATH, "r", encoding="utf-8") as f:
+        tts_infer_config = yaml.safe_load(f)
+
+    version_config = tts_infer_config.get(version)
+    if not version_config:
+        raise ValueError(f"tts_infer.yaml 中缺少版本配置: {version}")
+
+    t2s_path = GPTSOVITS_DIR / version_config["t2s_weights_path"]
+    vits_path = GPTSOVITS_DIR / version_config["vits_weights_path"]
+
+    try:
+        resp = requests.get(
+            f"{GPTSOVITS_API_URL}/set_gpt_weights",
+            params={"weights_path": str(t2s_path)},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        resp = requests.get(
+            f"{GPTSOVITS_API_URL}/set_sovits_weights",
+            params={"weights_path": str(vits_path)},
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"切换 GPT-SoVITS 版本失败: {e}")
+
+    print(f"✓ 已切换 GPT-SoVITS 到 {version} 版本")
 
 
 def task_dir(task_id):
@@ -194,9 +244,12 @@ def apply_script(task_id):
 
         # 1a. 文本未改动的句子：直接从原始音轨裁剪对应时间段复用，
         # 完整保留原始音色/语气，且彻底规避 GPT-SoVITS 短文本合成异常
+        # 停顿分段（is_pause）既不复用也不合成，交给合并阶段的静音底轨自然留白
         extractor = AudioExtractor()
         changed_segments = []
         for i, seg in enumerate(segments):
+            if seg.get("is_pause"):
+                continue
             if seg.get("changed", True):
                 changed_segments.append((i, seg))
                 continue
@@ -208,6 +261,9 @@ def apply_script(task_id):
         # GPT-SoVITS 对部分文本会稳定返回固定短时长但内容无效的音频，
         # 仅靠时长估算无法检测，这里传入 ASR 校验器，合成后核对实际吐字内容
         if changed_segments:
+            gptsovits_version = request.form.get("version", "v4")
+            switch_gptsovits_version(gptsovits_version)
+
             verifier = SpeechTranscriber(
                 model_name=CONFIG["whisper_model"],
                 language=CONFIG["whisper_language"],
@@ -218,8 +274,10 @@ def apply_script(task_id):
                 meta["reference_text"],
                 meta["prompt_language"],
             )
+            _EMOTION_PARAM_KEYS = ("speed_factor", "temperature", "top_k", "top_p", "repetition_penalty")
             synthesized = cloner.synthesize_batch(
-                [{"id": i, "text": seg["text"], "line_id": seg.get("line_id", i)}
+                [{"id": i, "text": seg.get("synth_text", seg["text"]), "line_id": seg.get("line_id", i),
+                  **{k: seg.get(k) for k in _EMOTION_PARAM_KEYS}}
                  for i, seg in changed_segments],
                 synthesis_dir,
             )

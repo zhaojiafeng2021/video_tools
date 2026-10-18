@@ -208,7 +208,11 @@ class VoiceCloner:
         # 合并额外参数
         params.update(kwargs)
 
-        min_duration = self._estimate_min_duration(text)
+        # speed_factor 会直接按比例改变输出音频时长（如 1.3 倍速对应约 1/1.3
+        # 时长），时长校验的预期下限需按此折算，否则情绪标记调快语速后会被
+        # 误判为"偏短异常"而不断重试
+        speed_factor = params.get('speed_factor') or 1.0
+        min_duration = self._estimate_min_duration(text) / speed_factor
         print(f"正在合成语音: {text[:30]}...")
 
         best_duration = -1.0
@@ -220,7 +224,7 @@ class VoiceCloner:
                 response = requests.post(
                     f"{self.api_url}/tts",
                     json=params,
-                    timeout=60
+                    timeout=600  # v3 含 super_sampling，比 v4 更慢，需要更长超时
                 )
             except requests.exceptions.RequestException as e:
                 raise RuntimeError(f"语音合成失败: {str(e)}")
@@ -287,10 +291,16 @@ class VoiceCloner:
         耗尽仍无法通过内容校验，用重试过程中相似度/时长最佳的候选结果
         兜底保存，确保该行始终有音频产出，不会变成完全静音。
 
+        每个 text_segment 字典除 'text'/'id' 外，还可以携带自己的合成参数
+        （如 'speed_factor'、'temperature'），用于实现逐句不同的语气/语速
+        控制（如情绪标记映射）。这些逐句参数会覆盖 **kwargs 中的同名全局
+        参数，不影响其他句子。
+
         Args:
-            text_segments: 文本段落列表 [{'text': '...', 'id': 0}, ...]
+            text_segments: 文本段落列表
+                [{'text': '...', 'id': 0, 'speed_factor': 1.3, ...}, ...]
             output_dir: 输出目录
-            **kwargs: 合成参数
+            **kwargs: 全局合成参数（应用于所有未单独指定的句子）
             
         Returns:
             list: 生成的音频文件路径列表
@@ -300,12 +310,20 @@ class VoiceCloner:
 
         texts = [seg.get('text', seg) if isinstance(seg, dict) else seg for seg in text_segments]
         seg_ids = [seg.get('id', i) if isinstance(seg, dict) else i for i, seg in enumerate(text_segments)]
+        # 每句独立的合成参数（如 speed_factor/temperature），覆盖全局 kwargs 中的同名项
+        _RESERVED_KEYS = {'text', 'id', 'line_id'}
+        per_seg_kwargs = [
+            {k: v for k, v in seg.items() if k not in _RESERVED_KEYS and v is not None}
+            if isinstance(seg, dict) else {}
+            for seg in text_segments
+        ]
 
         audio_files = [None] * len(text_segments)
         for idx, text in enumerate(texts):
             output_path = output_dir / f"segment_{seg_ids[idx]:03d}.wav"
+            merged_kwargs = {**kwargs, **per_seg_kwargs[idx]}
             try:
-                audio_files[idx] = self.synthesize(text, output_path, **kwargs)
+                audio_files[idx] = self.synthesize(text, output_path, **merged_kwargs)
             except _SynthesisFailed as e:
                 if e.best_bytes is not None:
                     with open(output_path, 'wb') as f:

@@ -84,6 +84,7 @@ applyBtn.addEventListener("click", async () => {
   const blob = new Blob([content], { type: "text/plain" });
   const formData = new FormData();
   formData.append("script", blob, "script.txt");
+  formData.append("version", document.getElementById("versionSelect").value);
 
   try {
     const resp = await fetch(`/api/apply/${currentTaskId}`, { method: "POST", body: formData });
